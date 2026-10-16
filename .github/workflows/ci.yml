@@ -1,0 +1,178 @@
+# CI for dsh-session-mail.
+#
+# ## This file is a spare: it is committed but NOT enabled, and there is no remote yet.
+#
+# It is written and reviewed ahead of time so that turning CI on is a one-line
+# change once its preconditions are met. Running it today would fail on purpose,
+# not silently pass (see the E1 guard below).
+#
+# Enablement preconditions — all three, in this order:
+#
+#   1. A remote exists and this repository is pushed to it. Today `git remote -v`
+#      is empty, and the ruling is to keep it that way until the de-identification
+#      pass is done: the working tree still contains absolute user paths and real
+#      session ids, and a published remote cannot be unpublished.
+#   2. Phase 2 (de-identification) is complete, so nothing private would be made
+#      public by a workflow run's artifacts or logs.
+#   3. The L2/L3 carrier decision is settled. The runner below is the carrier for
+#      L1 only; the model credential is deliberately NOT a CI secret, so L2's
+#      end-to-end case (a real delivery turn) is out of scope here. See
+#      docs/跨平台probe-设计-2026-10-16.md.
+#
+# ## ⚠ Enabling this workflow today turns it red: enable `logic` only
+#
+# E1 was ruled NOT to be dispatched, so `lib/` still cannot be rebuilt from a
+# clean checkout and there is no tsdown in devDependencies. The `bundle` job's E1
+# guard therefore fails **by design** — it is written to fail explicitly rather
+# than skip, because a job that skips while proving nothing is a false green. So
+# when this repository gets a remote, either gate the `bundle` job behind a
+# variable (e.g. `if: vars.ENABLE_BUNDLE == 'true'`) or leave only `logic`
+# enabled until E1 lands. Turning the whole file on as-is would report a red CI
+# for a known, accepted reason. Recorded in docs/首发最小清单-2026-10-16.md §6.
+#
+# ## What this covers: L1, the logic layer
+#
+# L1 needs no installed dependencies and no host: the suite mounts a stub host.
+# That is what makes this workflow cheap enough to run on every push. It proves
+# syntax and behaviour, NOT that the plugin loads in a real DSH process — that is
+# L2, and it needs a carrier and a booted host.
+#
+# ## Known blocker: the bundle step needs E1
+#
+# `lib/` is gitignored and the client bundle cannot currently be rebuilt from a
+# clean checkout (the toolchain comes from a sibling deepseek-harness checkout).
+# So the bundle step below is guarded: with no `devDependencies` it fails with an
+# explicit message instead of skipping, because a skipped bundle job would be a
+# false green for the one artifact the Web UI actually loads. Landing E1
+# (devDependencies + a self-contained tsdown config) is what turns this step on.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  logic:
+    name: L1 · logic (no dependencies, no host)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The suite uses `node --test` with a glob, which needs a recent Node.
+        node: ['22.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No install step on purpose: the suite imports only node: builtins and
+      # repository-relative paths, and it must keep doing so. If a dependency
+      # ever becomes necessary, that is a deliberate change, not a convenience
+      # to paper over here.
+
+      - name: Syntax check
+        run: |
+          node --check index.mjs
+          node --check mailbox.mjs
+          node --check session-tools.mjs
+
+      - name: Test suite
+        run: node --test "tests/*.spec.mjs"
+
+      - name: Shared deployment statements still match
+        # The two statements shared with dsh-session-liveness are interface, not
+        # prose, and their anchor is this script plus its boundary - a bare hash is
+        # not reproducible. The check needs a sibling checkout of the other
+        # repository, which a runner does not have, so it runs only where that
+        # sibling exists and says so otherwise. It is deliberately NOT
+        # `continue-on-error`: a check that always "passes" while proving nothing is
+        # worse than one that reports it could not run.
+        #
+        # The script resolves its inputs relative to itself, so its own cwd is
+        # irrelevant here.
+        run: |
+          if [ -d ../dsh-session-liveness ]; then
+            node tools/verify-shared-text.mjs
+          else
+            echo "::notice::no sibling dsh-session-liveness checkout; the shared-statement check ran nowhere"
+          fi
+
+      - name: Assert the suite never loads the real host
+        # The stub-host boundary is what keeps L1 runnable with no install. If a
+        # test starts importing a @deepseek-ai package, this fails loudly rather
+        # than letting CI quietly acquire a dependency. It looks at import
+        # statements rather than grepping for the package name, so the message
+        # this step prints cannot match itself.
+        run: |
+          node --input-type=module -e "
+            import { readdirSync, readFileSync, statSync } from 'node:fs'
+            import { join } from 'node:path'
+            const files = []
+            const walk = dir => {
+              for (const name of readdirSync(dir)) {
+                const path = join(dir, name)
+                if (statSync(path).isDirectory()) walk(path)
+                else if (name.endsWith('.mjs')) files.push(path)
+              }
+            }
+            walk('tests')
+            const offenders = files.filter(file =>
+              /^\s*(?:import|export)[\s\S]*?from\s+['\"]@deepseek-ai\//m.test(readFileSync(file, 'utf8'))
+              || /require\(\s*['\"]@deepseek-ai\//.test(readFileSync(file, 'utf8')))
+            if (offenders.length > 0) {
+              console.error('tests must not import the real host; L1 is stubbed on purpose:')
+              for (const file of offenders) console.error('  ' + file)
+              process.exit(1)
+            }
+            console.log(files.length + ' test files scanned; no real-host import')
+          "
+
+  bundle:
+    name: Artifact · client bundle materializes
+    runs-on: ubuntu-latest
+    needs: logic
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Require a self-contained build (E1)
+        run: |
+          if ! node -e "const p=require('./package.json'); process.exit(p.devDependencies?.tsdown ? 0 : 1)"; then
+            echo "::error::E1 is not landed: no tsdown in devDependencies, so lib/client.js cannot be rebuilt from a clean checkout. This step is intentionally red until then — see the header of this file."
+            exit 1
+          fi
+
+      # E1 acceptance is the materialize gate, NOT byte equality: a rebuild with a
+      # different tsdown version differs in bytes (measured: 40,339 vs the tracked
+      # 40,302 on the liveness plugin, which has the same toolchain story) while
+      # still satisfying the loader contract. Gating on bytes would fail for a
+      # reason that does not matter.
+      - name: Install
+        # `--legacy-peer-deps` is required, not cosmetic: the published host
+        # packages disagree with each other (e.g. dsh-client-locale@0.0.1-rc.1
+        # wants @deepseek-ai/dsh-invariants ^0.0.1-rc.1 while
+        # dsh-client-ui-renderer wants ^0.1.0-rc.8), so a strict `npm install`
+        # exits 1 before the build is ever reached. Chosen over (b) rewriting
+        # peer declarations, which is not ours to change, and over (c) skipping
+        # by default, which would make this job green while proving nothing.
+        run: npm install --no-audit --no-fund --legacy-peer-deps
+
+      - name: Build the client bundle
+        run: npm run bundle
+
+      - name: Materialize the built bundle
+        # The bundle-smoke default module base is a Windows path from one
+        # developer's machine; pass the local react explicitly so the check works
+        # on any carrier.
+        run: |
+          node bundle-smoke.cjs lib/client.js "$(node -p "require.resolve('react/package.json')")"

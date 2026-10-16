@@ -1,0 +1,59 @@
+{
+  "name": "@fleetingold/dsh-session-mail",
+  "version": "0.7.0",
+  "description": "Cross-session mailbox plugin for DeepSeek Harness: address a peer Session by role or id, deliver into its inbox, wake it when idle, and settle each delivery through a claim ledger.",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "author": "fleetingold",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "mailbox",
+    "agent",
+    "session",
+    "inter-agent",
+    "ipc"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fleetingold/dsh-session-mail.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "index.mjs",
+    "mailbox.mjs",
+    "session-tools.mjs",
+    "src/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "tsdown",
+    "test": "node --test \"tests/*.spec.mjs\""
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  }
+}

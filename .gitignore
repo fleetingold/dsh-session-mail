@@ -1,0 +1,5 @@
+# Build artifacts: rebuilt from source via tsdown (harness repo toolchain).
+lib/
+# Deployed-state snapshots live here, pruned by sync.ps1 (not source history).
+backups/
+node_modules/
