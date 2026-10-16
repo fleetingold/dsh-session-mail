@@ -29,6 +29,7 @@ down, and settled once.
 - [Compatibility](#compatibility)
 - [Security and deployment constraints](#security-and-deployment-constraints)
 - [Release boundary: what is not in this repository](#release-boundary-what-is-not-in-this-repository)
+- [Running the tests](#running-the-tests)
 - [Known limitations](#known-limitations)
 
 ## What it does
@@ -234,6 +235,37 @@ an outside user can run, and the difference matters:
 In short: this repository's *code* carries eight tools; an outside user's *usable* surface is six, and
 the panel is absent.
 
+## Running the tests
+
+The suite mounts a stub host (`tests/helpers/fake-host.mjs`), so it needs **no** `@deepseek-ai`
+package in `tests/` — that boundary is asserted in CI. The plugin file it loads, however, does import
+three peer dependencies, so a clean clone must install them first or every test file fails before it
+runs a single case:
+
+```sh
+# 1. install the three peers (outside the checkout is safest — see the note below)
+mkdir -p /tmp/dsh-peers && cd /tmp/dsh-peers && npm init -y
+npm install --no-audit --no-fund @deepseek-ai/schemastery @deepseek-ai/dsh-llm @deepseek-ai/dsh-tools
+
+# 2. make them resolvable from this checkout, e.g.
+#    ln -s /tmp/dsh-peers/node_modules/@deepseek-ai/* <checkout>/node_modules/@deepseek-ai/
+#    (on Windows, one directory junction per package: mklink /J <link> <target>)
+
+# 3. then
+node --test "tests/*.spec.mjs"
+```
+
+Without that install, all test files report
+`ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/schemastery'`, imported from `index.mjs`.
+This package declares those three only as `peerDependencies`, and npm does not install a peer the
+project does not itself depend on, so a bare `npm install` here reports "up to date" and installs
+nothing. Naming them explicitly **inside** the checkout is the obvious next move and is what the
+suite was originally verified through, but npm 12.0.2 (the version on that machine) throws
+`Cannot read properties of null (reading 'children')` while resolving them there; the same install in
+a standalone directory, followed by a link, is what was measured green. On that machine Node's own
+`npm` was not on `PATH` either, so the commands above ran as
+`node <node-dir>/node_modules/npm/bin/npm-cli.js install ...`.
+
 ## Known limitations
 
 - **Same machine only.** Liveness and claims use process ids, which are meaningful on one machine.
@@ -275,6 +307,7 @@ the panel is absent.
 - [兼容声明](#兼容声明)
 - [安全与部署约束](#安全与部署约束)
 - [发行边界：本仓不含什么](#发行边界本仓不含什么)
+- [跑测试](#跑测试)
 - [已知限制](#已知限制)
 
 ## 它做什么
@@ -444,6 +477,32 @@ mail_send { "to": "frontend", "topic": "task",
 - **观测面属于一个尚未开源的配套插件**：三态会话读数（`alive` / `remote` / `cold`）、侧栏行标记与行菜单动作、跨进程 hold 释放、`.liveness/` 控制通道，均来自 `dsh-session-liveness`。**没有它，本包仍能发信、投递、结算，但没有任何地方显示存活状态、也没有任何东西能释放 hold。** 该插件是否开源是**另一个更晚的决定**。
 
 一句话：**本仓代码带八个工具；外部使用者的可用面是六个，且面板缺席。**
+
+## 跑测试
+
+测试挂的是**替身宿主**（`tests/helpers/fake-host.mjs`），因此 `tests/` 里**不需要**任何 `@deepseek-ai` 包——这条边界由 CI 断言。但它加载的插件文件本身要 import **三个 peer 依赖**，所以**干净 clone 必须先装它们**，否则每个测试文件在跑第一个用例之前就整体失败：
+
+```sh
+# 1. 先把三个 peer 装好（装在 checkout 之外最稳，原因见下）
+mkdir -p /tmp/dsh-peers && cd /tmp/dsh-peers && npm init -y
+npm install --no-audit --no-fund @deepseek-ai/schemastery @deepseek-ai/dsh-llm @deepseek-ai/dsh-tools
+
+# 2. 让本 checkout 能解析到它们，例如
+#    ln -s /tmp/dsh-peers/node_modules/@deepseek-ai/* <checkout>/node_modules/@deepseek-ai/
+#    （Windows 上每个包建一个目录联接：mklink /J <link> <target>）
+
+# 3. 然后
+node --test "tests/*.spec.mjs"
+```
+
+不装就直接跑的话，所有测试文件都会以
+`ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/schemastery'`（来自 `index.mjs`）失败。
+本包把这三个只声明为 `peerDependencies`，而 npm **不会**替你装项目自身未依赖的 peer ⇒ 在本仓裸跑
+`npm install` 只会回一句 "up to date" 而什么都不装。下一步显然是**在 checkout 内点名安装**，本套件最初也
+正是这样验证的；但该机上的 npm 12.0.2 在 checkout 内解析它们时会抛
+`Cannot read properties of null (reading 'children')`，而**先装到独立目录、再链接进来**这套是被实测为绿的做法。
+那台机器上 Node 自带的 `npm` 也不在 `PATH`，所以上面的命令实际是
+`node <node-dir>/node_modules/npm/bin/npm-cli.js install ...`。
 
 ## 已知限制
 
