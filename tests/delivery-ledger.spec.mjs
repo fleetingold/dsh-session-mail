@@ -95,6 +95,13 @@ test('a wake, an injection, and a settlement each leave one ledger line', async 
     assert.equal(woke.woke, true)
     assert.equal(injected.delivered, 'injected')
 
+    // The settlement record is written by a later asynchronous step than the claim
+    // reaching its terminal state, so wait for it to land before asserting. Without
+    // this the read below raced it: observed `['delivery', 'delivery']` against an
+    // expected third `settlement`, which is a missing record, not a wrong one.
+    await waitFor(async () => (await readLedgerRecords(maildir))
+      .some(record => record.event === 'settlement' && record.msg === woke.id))
+
     // The same records are in the maildir ledger, readable with no log sink at
     // all — that file is what an operator opens.
     //
@@ -190,7 +197,16 @@ test('an identical decision is recorded once even when it is reported repeatedly
     const sent = await sender.tools.get('mail_send').execute(
       { to_session: TARGET, topic: 'info', body: 'once' }, { agent: sender },
     )
-    await waitFor(async () => (await readLedgerRecords(maildir)).length === 1)
+    // Wait for the scenario's own record rather than for "one record". The mount
+    // scan's `goal-disarm-scan` line is appended at mount, before any delivery, so a
+    // bare `length === 1` is satisfied by that line whenever it lands first — the
+    // wait then proceeded with no delivery record present at all. Measured with a
+    // probe on the runs that failed: `n=1 events=goal-disarm-scan` within 1 ms of the
+    // send. This is the same correction the first case's own wait needed.
+    await waitFor(async () => {
+      const records = (await readLedgerRecords(maildir)).filter(record => record.event !== 'goal-disarm-scan')
+      return records.length === 1 && records[0].event === 'delivery'
+    })
     const target = host.agents[0]
     for (let repeat = 0; repeat < 3; repeat++) {
       host.emit('agent/inbox/claimed', { agent: target, message: target.received[0], turn: 4 })
@@ -203,6 +219,14 @@ test('an identical decision is recorded once even when it is reported repeatedly
       })
       await new Promise(resolve => setTimeout(resolve, 20))
     }
+    // The three repeated reports are what this case is about: the decision is already
+    // recorded, so they must add nothing. The settlement record itself lands through a
+    // later asynchronous step, so wait for it before counting — measured on the runs
+    // that failed: the read raced it and saw no settlement yet (`0 !== 1`), not a
+    // duplicate one. The counts below are still exact, so a genuine second write would
+    // fail the case.
+    await waitFor(async () => (await readLedgerRecords(maildir))
+      .some(record => record.event === 'settlement' && record.msg === sent.id))
     const records = await readLedgerRecords(maildir)
     assert.equal(records.filter(record => record.event === 'delivery').length, 1)
     assert.equal(records.filter(record => record.event === 'settlement' && record.msg === sent.id).length, 1)
@@ -226,13 +250,21 @@ test('T-b: a settled line is skipped without re-attempting its claim', async () 
     await markMessageConsumed(maildir, {
       role: 'repo', msgId: 'skipped', sessionId: TARGET, owner: { pid: process.pid, boot: 'test' },
     })
-    for (let pass = 0; pass < 5; pass++) {
+    // `host.runPolls()` is fire-and-forget: it calls the captured interval callback
+    // and drops the promise, while the callback body is an un-awaited `poll()`.
+    // Running a fixed number of passes and then reading is therefore a bet that the
+    // async poll finished inside the sleeps — a bet the loaded suite loses. Ask for
+    // one pass per attempt instead and let `waitFor`'s own await give that pass time
+    // to run. This is a read-timing change only: the line cannot fall behind the
+    // watermark while the unclaimed `stall` line blocks the prefix, so the record is
+    // late rather than lost, and every assertion below keeps its meaning.
+    const skips = await waitFor(async () => {
       host.runPolls()
-      await new Promise(resolve => setTimeout(resolve, 10))
-    }
+      const records = (await readLedgerRecords(maildir)).filter(record => record.event === 'delivery-skipped')
+      return records.some(record => record.claimState === 'consumed') ? records : false
+    }, { timeoutMs: 5000 })
     // The skip record is written once per distinct claim state; what must not
     // happen is a new line per poll pass.
-    const skips = (await readLedgerRecords(maildir)).filter(record => record.event === 'delivery-skipped')
     assert.ok(skips.length >= 1, 'the skip must be visible in the ledger')
     assert.ok(skips.every(record => record.msg === 'skipped'), JSON.stringify(skips))
     assert.ok(skips.some(record => record.claimState === 'consumed'), JSON.stringify(skips))
