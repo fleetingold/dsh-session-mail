@@ -244,12 +244,22 @@ test('T7b: an undecided wake extends its window while the turn is still running'
   const maildir = await makeMaildir()
   const host = await createHost({
     maildir, identities: IDENTITIES, agents: [{ id: 'session-ddddddd4-dddd-4ddd-8ddd-ddddddddddd4', cwd: REPO_CWD }],
-    config: { wakeWindowMs: 30, wakeWindowExtensions: 5 },
+    // The window has to outlast this test's own round trip: it is armed at delivery
+    // (index.mjs armWakeWindow, only while the target is idle), and the case marks the
+    // target running right after `await send(...)`. At 30ms the window could expire
+    // before that assignment under load, settling the wake as expired-while-idle and
+    // deleting the scenario. 300ms is still two orders below the production default
+    // (600000) and leaves the semantics being tested untouched.
+    config: { wakeWindowMs: 300, wakeWindowExtensions: 5 },
   })
   try {
     const sender = host.addAgent({ id: 'session-eeeeeee5-eeee-4eee-8eee-eeeeeeeeeee5', cwd: REPO_CWD })
     const target = host.agents[0]
     const sent = await send(sender, 'session-ddddddd4-dddd-4ddd-8ddd-ddddddddddd4', 'slow turn')
+    // Pin the path this case rests on. If the delivery ever stops being a wakeup,
+    // the extension assertions below would measure nothing, so say so here instead.
+    assert.equal(sent.woke, true)
+    assert.equal(sent.mode, 'wakeup')
     // The turn is still working: a slow multi-step turn must not be reported as
     // a dead wake, however many windows it outlasts within the extension cap.
     target.status = 'running'
@@ -263,6 +273,10 @@ test('T7b: an undecided wake extends its window while the turn is still running'
     target.status = 'idle'
     await waitFor(async () => (await readClaim(maildir, DIRECT_CLAIM_ROLE, sent.id))?.state === 'failed')
     assert.equal((await readClaim(maildir, DIRECT_CLAIM_ROLE, sent.id)).reason, 'consumption-window-expired')
+    // The receipt is written after the terminal state, so wait for it instead of
+    // reading the staging pool on the same tick as the claim.
+    await waitFor(async () =>
+      (await readInboxLines(directPath(maildir, 'session-eeeeeee5-eeee-4eee-8eee-eeeeeeeeeee5'))).length === 1)
     assert.equal((await readInboxLines(directPath(maildir, 'session-eeeeeee5-eeee-4eee-8eee-eeeeeeeeeee5'))).length, 1)
   } finally {
     host.stop()
@@ -273,18 +287,26 @@ test('T7b cap: a turn still running at the hard cap reports why it could not be 
   const maildir = await makeMaildir()
   const host = await createHost({
     maildir, identities: IDENTITIES, agents: [{ id: 'session-ddddddd4-dddd-4ddd-8ddd-ddddddddddd4', cwd: REPO_CWD }],
-    config: { wakeWindowMs: 30, wakeWindowExtensions: 0 },
+    config: { wakeWindowMs: 300, wakeWindowExtensions: 0 },
   })
   try {
     const sender = host.addAgent({ id: 'session-eeeeeee5-eeee-4eee-8eee-eeeeeeeeeee5', cwd: REPO_CWD })
     const target = host.agents[0]
     const sent = await send(sender, 'session-ddddddd4-dddd-4ddd-8ddd-ddddddddddd4', 'stuck while running')
+    // Same path pin as the case above: a cap only means anything for a wakeup, and
+    // the window below must be armed while the target is still idle.
+    assert.equal(sent.woke, true)
+    assert.equal(sent.mode, 'wakeup')
     target.status = 'running'
     await waitFor(async () => (await readClaim(maildir, DIRECT_CLAIM_ROLE, sent.id))?.state === 'failed')
 
     // "Running and never answering" is distinguishable from "never started".
     assert.equal((await readClaim(maildir, DIRECT_CLAIM_ROLE, sent.id)).reason,
       'consumption-window-expired-while-running')
+    // The receipt lands after the terminal state; wait for it rather than reading
+    // the staging pool on the same tick.
+    await waitFor(async () =>
+      (await readInboxLines(directPath(maildir, 'session-eeeeeee5-eeee-4eee-8eee-eeeeeeeeeee5'))).length === 1)
     assert.equal((await readInboxLines(directPath(maildir, 'session-eeeeeee5-eeee-4eee-8eee-eeeeeeeeeee5'))).length, 1)
   } finally {
     host.stop()

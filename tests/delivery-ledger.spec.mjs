@@ -77,6 +77,12 @@ test('a wake, an injection, and a settlement each leave one ledger line', async 
       frame: { type: 'end', attemptId: 'a1', revision: 1, index: 2, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 3 } },
     })
     await waitFor(async () => (await readClaim(maildir, DIRECT_CLAIM_ROLE, woke.id))?.state === 'consumed')
+    // That wait observes the claim write; the settlement note is written by the step
+    // after it, so reading the log sink here synchronously races that step — under a
+    // loaded suite the log then held the two deliveries and no settlement. Wait for
+    // the note itself; the deep-equal below still requires exactly these three
+    // events, in this order, so nothing is relaxed.
+    await waitFor(async () => ledger(host).some(record => record.event === 'settlement' && record.msg === woke.id))
 
     const records = ledger(host).filter(record => record.event !== 'goal-disarm-scan')
     assert.deepEqual(records.map(record => record.event), ['delivery', 'delivery', 'settlement'])
@@ -312,6 +318,11 @@ test('T-c: an unclaimed line still blocks the watermark, a settled line still pa
     await new Promise(resolve => setTimeout(resolve, 30))
     host.runPolls()
     // The settled line cannot advance the prefix past the unclaimed one.
+    // The cursor is written by the pass that just ran, and `host.runPolls()` does not
+    // await it, so wait for the write instead of reading on the same tick. The
+    // assertion below is unchanged: the settled line still must not pass the
+    // unclaimed one, so the cursor must stay at 0.
+    await waitFor(async () => { host.runPolls(); return (await readCursor(maildir, 'repo')) === 0 })
     assert.equal(await readCursor(maildir, 'repo'), 0)
 
     // Once the unclaimed line is settled too, the prefix advances over both.
